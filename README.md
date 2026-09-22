@@ -33,13 +33,19 @@ Built to gain practical experience in analyzing network traffic and exploring th
 ## Architecture
 
 ```
-main.go                 entry point: setup, event loop (ticker / signal / packet channel)
-config.go               constants, CLI argument parsing, interface/whitelist/BPF setup
-process_and_update.go   packet parsing: layer extraction and protocol dispatch
-update.go               per-IP state updates: counters per protocol, log writing
-types.go                shared types: IDS, ipInfo
-detect.go               threshold-based attack detection
+src/main.go              orchestration: CLI, capture loop, windows and shutdown
+src/config/               interface, whitelist, BPF filter and packet capture
+src/memory/               per-IP state, sliding windows and ARP cache seeding
+src/process/              packet validation and dispatch boundary
+src/update/               IPv4/ARP/TCP/UDP/DNS counter updates
+src/detect/               threshold-based attack detection
+src/logger/               buffered log file output
 ```
+
+The dependency direction is intentionally one-way: `main` coordinates the packages;
+`process` delegates to `update`; `update` uses `memory` for state and `detect` for
+threshold checks; `logger` is independent of application packages. This keeps packet
+capture, state mutation, detection and output separate.
 
 ### Design decisions
 
@@ -120,16 +126,30 @@ Output is appended to `ids.log` with a timestamp:
 
 The log file opens in append mode, so restarting the IDS preserves prior history.
 
+## Dependencies
+
+The runtime dependency set is deliberately small:
+
+| Dependency | Role |
+|---|---|
+| `github.com/google/gopacket` | Packet decoding and live capture through `pcap` |
+| `github.com/mostlygeek/arp` | Reading the local ARP cache for ARP spoofing checks |
+
+`libpcap` remains a system dependency because `gopacket/pcap` uses CGO.
+
 ## Project layout
 
 ```
 .
-├── main.go
-├── config.go
-├── update.go
-├── types.go
-├── detect.go
-├── go.mod / go.sum
+├── src/
+│   ├── main.go
+│   ├── config/
+│   ├── process/
+│   ├── update/
+│   ├── detect/
+│   ├── logger/
+│   ├── memory/
+│   └── go.mod / go.sum
 ├── whitelist.txt
 ├── ids.log             
 ```

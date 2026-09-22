@@ -1,110 +1,106 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"maps"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
+
+	"ids/config"
+	"ids/logger"
+	"ids/memory"
+	"ids/process"
 )
 
-func loading(str string) {
-	list := []string{"/", "-", "\\", "|"}
-	for {
-		for i := 0; i < 4; i++ {
-			fmt.Printf("\r\033[K  %s %s", str, list[i])
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
+func showLoading(frame int) {
+	frames := []rune{'|', '/', '-', '\\'}
+	fmt.Printf("\rIDS is monitoring traffic... %c", frames[frame%len(frames)])
+}
+
+func clearLoading() {
+	fmt.Print("\r\033[K")
 }
 
 func main() {
-	var handle *pcap.Handle
-	var err error
-	var packet gopacket.Packet
-	ids := new(IDS)
-	ids.memory = make(map[string]*ipInfo)
-	ids.precMemory = make(map[string]*ipInfo)
-	ids.initInCase("ALL")
-
-	logPath := "./logs/ids.go"
-	dir := filepath.Dir(logPath)
-
-	// 2. Créer le répertoire parent (et ses parents si nécessaire)
-	// 0755 est la permission standard pour les répertoires
-	err = os.MkdirAll(dir, 0755)
-	if err != nil {
-		log.Fatal(err)
-
-	}
-	ids.logFile, err = os.OpenFile("./logs/ids.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer ids.logFile.Close()
-
-	ids.writer = bufio.NewWriter(ids.logFile)
-
-	if !ids.arguemntsManagement() {
+	if len(os.Args) != 2 {
+		fmt.Println("usage: sudo ./ids <interface name>")
 		return
 	}
 
-	channel := make(chan gopacket.Packet, CHANNELSIZE)
-	tot := 0
+	interfaceName := os.Args[1]
+	myIP, err := config.InterfaceIP(interfaceName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	whitelist, err := config.LoadWhitelist("./whitelist.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	state := memory.New()
 
-	handle = ids.openLiveAnddFilter()
+	if err := os.MkdirAll("./logs", 0755); err != nil {
+		log.Fatal(err)
+	}
+	output, err := logger.New("./logs/ids.log")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer output.Close()
 
-	packetSource := gopacket.NewPacketSource(handle, layers.LinkTypeEthernet)
-	packetSource.NoCopy = true
+	handle, err := config.OpenLive(interfaceName, myIP, whitelist)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer handle.Close()
 
-	go getPacket(packetSource, channel)
+	packets := make(chan gopacket.Packet, config.ChannelSize)
+	source := gopacket.NewPacketSource(handle, layers.LinkTypeEthernet)
+	source.NoCopy = true
+	go config.StreamPackets(source, packets)
 
-	go loading("Running")
+	ticker := time.NewTicker(config.Period * time.Second)
+	defer ticker.Stop()
+	loadingTicker := time.NewTicker(500 * time.Millisecond)
+	defer loadingTicker.Stop()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 
-	ticker := time.NewTicker(PERIOD * time.Second)
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	var i int
-
+	packetCount, totalPackets := 0, 0
+	loadingFrame := 0
+	showLoading(loadingFrame)
 	for {
-		i = 0
-		ids.getARPCache()
-	maBoucle: // on nomme la boucle
-		for {
-
+		memory.SeedARPCache(state)
+		windowComplete := false
+		for !windowComplete {
 			select {
-			// Ctrl + c pour terminer (tuer ) le processus on perd pas les logs
-			case <-c:
-				fmt.Fprint(ids.writer, fmt.Sprint("[", time.Now().Format("Mon Jan 02 15:04:05 2006"), "] ", PERIOD, " seconds summary: ", i, " packets of ", tot, " || ", "\n"))
-				fmt.Println("\n[!] Arrêt de l'IDS... Écriture des logs en cours.")
-				ids.writer.Flush()
-				ids.logFile.Close()
-				os.Exit(0)
-
+			case <-signals:
+				clearLoading()
+				output.Write(fmt.Sprintf("%d seconds summary: %d packets of %d", config.Period, packetCount, totalPackets), "")
+				_ = output.Flush()
+				return
+			case <-loadingTicker.C:
+				loadingFrame++
+				showLoading(loadingFrame)
 			case <-ticker.C:
-				tot += i
-				vitess := (float64(i)) / PERIOD
-				fmt.Fprint(ids.writer, fmt.Sprint("[", time.Now().Format("Mon Jan 02 15:04:05 2006"), "] ", PERIOD, " seconds summary: ", i, " packets of ", tot, " || ", vitess, " packets per second ", "\n"))
-				ids.precMemory = maps.Clone(ids.memory)
-				clear(ids.memory)
-				break maBoucle //sans l'étiquette break est inutile ( ça sert de sortir de select ce qui se fait automatiquement)
-
-			case packet = <-channel:
-				i++
-				ids.processGoPacket(packet)
-
+				totalPackets += packetCount
+				packetsPerSecond := float64(packetCount) / float64(config.Period)
+				output.Write(fmt.Sprintf("%d seconds summary: %d packets of %d || %.2f packets per second", config.Period, packetCount, totalPackets, packetsPerSecond), "")
+				state.Previous = maps.Clone(state.Current)
+				state.Current = make(map[string]*memory.Info)
+				memory.EnsureIP(state, "ALL")
+				packetCount = 0
+				windowComplete = true
+			case packet := <-packets:
+				packetCount++
+				process.Packet(packet, state, myIP, output)
 			}
 		}
-		ids.writer.Flush()
+		_ = output.Flush()
 	}
 }
