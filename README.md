@@ -1,5 +1,7 @@
 # NIDS — Network Intrusion Detection System Project
 
+![image projet](assets/nids.jpg)
+
 A Network Intrusion Detection System written in Go, built on top of [`gopacket`](https://github.com/google/gopacket). It captures live traffic on a network interface, tracks per-IP behavioral statistics over sliding time windows, and flags patterns associated with common reconnaissance and flooding attacks.
 
 ## Goal
@@ -24,9 +26,9 @@ Built to gain practical experience in analyzing network traffic and exploring th
 
 ## How it works
 
-1. **Capture** — packets are pulled live from a network interface via `pcap`, filtered at the kernel level with a BPF filter (excluding the local machine and whitelisted IPs), and streamed through a buffered channel to a separate processing goroutine.
+1. **Capture** — packets are pulled live from a network interface via `pcap`and streamed through a buffered channel to a separate processing goroutine.
 2. **Per-IP state** — for each source IP, the IDS maintains a struct (`ipInfo`) of counters: SYN/ACK/FIN counts, distinct destination ports touched, ICMP/UDP/DNS counts, and the MAC address last seen replying via ARP for that IP.
-3. **Sliding window** — state resets every `PERIOD` seconds. The previous window (`precMemory`) is kept alongside the current one (`memory`), so detection can reason across two consecutive windows rather than only the most recent few seconds.
+3. **Sliding window** — state resets every `PERIOD` seconds. The previous window (`Memory.Previous`) is kept alongside the current one (`Memory.Current`), so detection can reason across two consecutive windows rather than only the most recent few seconds.
 4. **Detection** — after each state update, the relevant counters are checked against fixed thresholds. Detection logic (`detect.go`) only reads `ipInfo`/`IDS` state and never touches `gopacket`/`layers` types directly.
 5. **Logging** — detections and periodic traffic summaries (packet count, packets/sec) are appended to `ids.log` via a buffered writer, flushed on each tick and on shutdown.
 
@@ -49,9 +51,7 @@ capture, state mutation, detection and output separate.
 
 ### Design decisions
 
-- **Go prototype, C reimplementation later.** Go was chosen for fast iteration on detection logic; the validated core will later be ported to C.
-- **Whitelist file.** Trusted IPs (e.g. the local gateway) are excluded from capture via a BPF filter built from `whitelist.txt`.
-- **Kernel-level filtering.** The BPF filter excludes the local IP and whitelisted IPs as packet sources before any Go code runs, reducing userspace processing.
+- **Go prototype.** Go was chosen for fast iteration on detection logic;
 - **Two-window memory model.** Keeping both the current and previous statistics window lets detection reason across window boundaries without unbounded memory growth.
 - **Capture/processing decoupling.** Packet capture and processing run in separate goroutines connected by a buffered channel, so bursts of traffic don't block capture.
 - **ARP cache seeding.** At the start of each window, the system's existing ARP cache is read to seed known IP-to-MAC bindings before live traffic is analyzed.
@@ -92,20 +92,6 @@ On startup, the IDS resolves its own IP on the given interface, loads `whitelist
 | `Promiscious` | Whether the interface opens in promiscuous mode | true |
 | Whitelist | Path to a file listing IPs excluded from capture | `whitelist.txt` |
 
-### Detection thresholds (per two consecutive windows)
-
-| Constant | Value | Triggers on |
-|---|---|---|
-| `MaxSYNMinusAck` | 5000 | SYN flood |
-| `MaxSSHConnection` | 20 | SSH brute-force |
-| `MaxNbrPortsDistincts` | 30 | Port scan |
-| `MaxFin` | 500 | FIN scan/flood |
-| `MaxNull` | 500 | NULL scan |
-| `MaxXmas` | 500 | XMAS scan |
-| `MaxICMPS` | 6000 | ICMP flood |
-| `MaxUDP` | 5000 | UDP flood |
-| `MaxDNSResMinusReq` | 4000 | DNS amplification |
-
 ## Whitelist format
 
 One IP per line. Lines starting with `#` and empty lines are ignored:
@@ -141,17 +127,27 @@ The runtime dependency set is deliberately small:
 
 ```
 .
-├── src/
-│   ├── main.go
-│   ├── config/
-│   ├── process/
-│   ├── update/
-│   ├── detect/
-│   ├── logger/
-│   ├── memory/
-│   └── go.mod / go.sum
-├── whitelist.txt
-├── ids.log             
+   src
+    ├── config
+    │   └── config.go
+    ├── detect
+    │   └── detect.go
+    ├── go.mod
+    ├── go.sum
+    ├── ids
+    ├── logger
+    │   └── logger.go
+    ├── main.go
+    ├── memory
+    │   └── memory.go
+    ├── process
+    │   └── process.go
+    ├── types
+    ├── update
+    │   ├── update.go
+    │   └── util.go
+    └── whitelist.txt
+            
 ```
 
 ## Testing setup
