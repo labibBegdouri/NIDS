@@ -1,7 +1,7 @@
 # NIDS — Network Intrusion Detection System Project
-
-![image projet](assets/nids.jpg)
-
+  <p align="center">
+<img src="assets/nids.jpg" alt="image" width="300">
+     </p>
 A Network Intrusion Detection System written in Go, built on top of [`gopacket`](https://github.com/google/gopacket). It captures live traffic on a network interface, tracks per-IP behavioral statistics over sliding time windows, and flags patterns associated with common reconnaissance and flooding attacks.
 
 ## Goal
